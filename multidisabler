@@ -50,10 +50,15 @@ resize_fs() {
     echo " - Make the $path partition R/W by unsharing its blocks..."
     e2fsck -E unshare_blocks $dm_block_ext4
   elif [ "$dm_block_f2fs" ]; then
-    fs_size_mb=$(du -sm $path | cut -f1)
+    fs_size_mb=`du -sm $path | cut -f1`
+    part_size_mb=`blockdev --getsize64 $dm_block_f2fs | awk '{print int($1 / 1048576)}'`
     super_free_mb=`lptools free | grep Free | awk '{print int($3 / 1048576)}'`
     new_fs_size_mb=`echo $fs_size_mb $super_free_mb $percent | awk '{print int($1 + $2 * $3 / 100)}'`
-    uuid=$(toybox blkid $dm_block_f2fs | egrep '[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}' -o)
+    if [[ "$new_fs_size_mb" -le "$part_size_mb" ]]; then
+      # just in case if we resized the partition, but not the FS
+      new_fs_size_mb=$part_size_mb
+    fi
+    uuid=`toybox blkid $dm_block_f2fs | egrep '[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}' -o`
     echo " - Create R/W $partname image..."
     truncate -s ${new_fs_size_mb}M /data/new-rw.img
     make_f2fs -g android -O project_quota,extra_attr,inode_checksum,sb_checksum,compression,flexible_inline_xattr,verity,inode_crtime -U $uuid -f -l $label /data/new-rw.img
@@ -61,6 +66,13 @@ resize_fs() {
     mount /data/new-rw.img /data/new-rw
     echo " - Copy old R/O $partname files to our new created image..."
     cp -a --preserve=all $path/* /data/new-rw
+    # Android's toybox `cp` is buggy: `cp -a --preserve=all` does NOT preserve selinux contexts
+    # on directories and symlinks and you get a bootloop. So we need to restore selinux contexts...
+    cd $path
+    find . -type dl -exec ls -dZ {} \; | awk '{ print "chcon -h " $0 }' > /data/new-rw-chcon.sh
+    cd /data/new-rw
+    sh /data/new-rw-chcon.sh
+    cd /
     umount $path
     umount /data/new-rw
     echo " - Checking $partname image before flashing..."
