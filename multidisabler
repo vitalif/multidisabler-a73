@@ -110,7 +110,7 @@ fs_free_size_check() {
 disable_fbe() {
   local md5
   local i
-  fstab_files=`grep -lr 'fileencryption' vendor/etc`
+  fstab_files=`grep -lr 'fileencryption' vendor/etc || true`
 
   #
   # Exynos devices = fstab.exynos*.
@@ -132,7 +132,7 @@ disable_fbe() {
 disable_fde() {
   local md5
   local i
-  fstab_files=`grep -lr 'forceencrypt' vendor/etc`
+  fstab_files=`grep -lr 'forceencrypt' vendor/etc || true`
 
   #
   # Exynos devices = fstab.exynos*.
