@@ -12,6 +12,8 @@
 # - Disables file-based encryption on /data
 # - Disables full-disk encryption on /data
 # - Disables stock recovery restoration
+# - Disables Vaultkeeper, proca and other bits from standard multidisabler:
+#   TLC HDM/ICCC/KG, CASS, WSM, FRP
 #
 
 set -e
@@ -30,6 +32,28 @@ file_changed() {
   else
     echo " -     ...unchanged."
   fi
+}
+
+rm_from_manifest() {
+  local service=$1
+  local md5
+  local i
+
+  # Package path is different on Android 10. Check and adapt.
+  #
+  [ $major -gt 9 ] && local path_extra='\.hardware'
+
+  for i in /vendor/etc/vintf/manifest.xml \
+    $ANDROID_ROOT/system/etc/vintf/compatibility_matrix.device.xml \
+    /vendor/etc/vintf/manifest/vaultkeeper_manifest.xml \
+    /vendor/etc/vintf/manifest/wsm_manifest.xml; do
+    if [ -f $i ]; then
+      echo " -   Found $i."
+      md5=$( md5 $i )
+      sed -i -e '/<hal format="hidl">/{N;/<name>vendor\.samsung'"$path_extra"'\.security\.'"$service"'<\/name>/{:loop;N;/<\/hal>/!bloop;d}}' $i
+      # file_changed $i $md5
+    fi
+  done
 }
 
 resize_fs() {
@@ -184,6 +208,134 @@ disable_recovery_restoration() {
   [ -z "$found" ] && echo " -   Found no stock recovery. Pfft." || true
 }
 
+disable_vaultkeeper() {
+  local md5
+  local i
+
+  echo " - Disabling vaultkeeper..."
+
+  if [ $major -gt 9 ]; then
+    # This is Android 10/11/12/13: Vaultkeeper has its own init files.
+    #
+    for i in $ANDROID_ROOT/system/etc/init/vk*.rc /vendor/etc/init/vk*.rc /vendor/etc/init/vaultkeeper*; do
+      if [ -f $i ]; then
+        echo " -   Found $i."
+        md5=$( md5 $i )
+        sed -i -e 's/^[^#].*$/# &/' $i
+        # file_changed $i $md5
+      fi
+    done
+  else
+    # This is Android 9: Vaultkeeper is started from init.rc.
+    #
+    sed -i -e 's/^[^#].*vaultkeeper.*$/# &/' \
+        -re '/\/system\/bin\/vaultkeeperd/,/^#?$/s/^[^#]*$/#&/' $ANDROID_ROOT/init.rc
+  fi
+
+  # Qualcomm devices such as the T860 and T865 need this, otherwise the log
+  # will be spammed with messages about failed connections to the Vaultkeeper
+  # service.
+  #
+  rm_from_manifest vaultkeeper
+
+  for i in $ANDROID_ROOT/system /vendor; do
+    if [ -f $i/bin/vaultkeeperd ]; then
+      echo " -   Found $i/bin/vaultkeeperd. Disabling..."
+      chmod 0 $i/bin/vaultkeeperd
+    fi
+    if [ -f $i/bin/vendor.samsung.hardware.security.vaultkeeper@2.0-service ]; then
+      chmod 0 $i/bin/vendor.samsung.hardware.security.vaultkeeper@2.0-service
+    fi
+  done
+}
+
+disable_proca() {
+  local md5
+  local i
+
+  echo " - Disabling process authentication..."
+
+  # G97[035]F = pa_daemon.rc on Android 9; pa_daemon_teegris.rc on Android 10.
+  # G977B, N97[05]F, A105F, A505F = pa_daemon_teegris.rc
+  # T510 + T515 = pa_daemon_kinibi.rc
+  # T860 + T865 = pa_daemon_qsee.rc
+  #
+  for i in /vendor/etc/init/pa_daemon*.rc; do
+    if [ -f $i ]; then
+      echo " -   Found $i. Disabling..."
+      sed -i -e 's/^[^#]/# &/' $i
+      # file_changed $i $md5
+    fi
+  done
+
+  rm_from_manifest proca
+}
+
+disable_tlc() {
+  echo " - Removing TLC HDM/ICCC/KG..."
+
+  # Fully remove those
+  for i in /vendor/etc/vintf/manifest/vendor.samsung.hardware.tlc.hdm@1.1-manifest.xml \
+    /vendor/etc/vintf/manifest/vendor.samsung.hardware.tlc.iccc@1.0-manifest.xml \
+    /vendor/etc/vintf/manifest/vendor.samsung.hardware.tlc.kg@1.0-manifest.xml \
+    /vendor/etc/vintf/manifest/vendor.samsung.hardware.tlc.kg@1.1-manifest.xml; do
+    if [ -f $i ]; then
+      echo " -   Found $i. Removing..."
+      rm $i
+    fi
+  done
+
+  for manifest in $(ls /vendor/etc/vintf/manifest.xml /vendor/etc/vintf/manifest/manifest.xml); do
+    for i in "blockchain" "ucm" "payment"; do
+      sed -i -e '/<hal format="hidl">/{N;/<name>vendor\.samsung\.hardware\.tlc\.'"$i"'<\/name>/{:loop;N;/<\/hal>/!bloop;d}}' $manifest
+    done
+  done
+
+  sed -i 's/^[^#]/# &/' /vendor/etc/init/vendor.samsung.hardware.tlc.*
+
+  sed -i 's/ro\.config\.iccc\_version\=3\.0/ro\.config\.iccc\_version\=iccc\_disabled/g' /system_root/system/build.prop
+}
+
+disable_cass() {
+  local md5
+  local i
+
+  # The T860 needs this. Otherwise, the log will fill with messages like this:
+  #
+  # 10-20 03:23:20.501 27757 27757 E CASS: Failed to connect(4)
+  # 10-20 03:23:20.501 27757 27757 E CASS: Failed to connect ril daemon(2). Retry cnt(6)
+  # The F907B on Android 10 also needs it:
+  #
+  # 04-05 22:21:23.519  3599  3599 E CASS_DEBUG: VaultKeeper is not ready. try again.
+  # 04-05 22:21:23.519  3599  3599 I CASS_DEBUG: Disconnect ril daemon
+  # 04-05 22:21:23.519  3599  3599 I CASS_DEBUG: Failed to connect ril daemon(1). Retry cnt(2)
+  #
+  # As of OneUI 2.5, other devices need it, too; even Exynos.
+  #
+  echo " - Disabling cass..."
+
+  for i in $ANDROID_ROOT/init.rc /vendor/init/cass.rc /vendor/etc/init/cass.rc; do
+    if [ -f $i ]; then
+      echo " -   Found $i. Disabling..."
+      md5=$( md5 $i )
+      sed -i -e 's/^[^#].*cass.*$/# &/' -re '/\/(system|vendor)\/bin\/cass/,/^#?$/s/^[^#]*$/#&/' $i
+      # file_changed $i $md5
+    fi
+  done
+
+  sed -i 's/ro\.security\.cass\.feature\=1/ro\.security\.cass\.feature\=0/g' /vendor/build.prop
+}
+
+disable_wsm() {
+  echo " - Disabling wsm..."
+  rm_from_manifest wsm
+}
+
+disable_frp() {
+  echo " - Disabling Factory Reset Protection (FRP)..."
+  sed -i 's/ro\.frp\.pst\=.*/ro\.frp\.pst\=/g' /vendor/build.prop
+}
+
 echo " "
 echo "Multi-disabler for Samsung devices"
 echo "running Android 9 or later."
@@ -262,6 +414,17 @@ fs_free_size_check /vendor vendor vendor 50
 disable_fbe
 disable_fde
 disable_recovery_restoration
+
+disable_vaultkeeper
+disable_proca
+disable_tlc
+disable_frp
+# No "fix_smart_view", I don't know what it is and it breaks boot on A73 %)
+
+if [ $major -gt 9 ]; then
+  disable_wsm
+  disable_cass
+fi
 
 echo " - Unmounting /vendor..."
 umount /vendor

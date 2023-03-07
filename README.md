@@ -1,6 +1,7 @@
 ## multidisabler для Samsung Galaxy A73
 
 Активирует возможность записи в / (раздел system) и /vendor, отключает шифрование /data, отключает восстановление самсунговского recovery
+и отключает остальные мелочи, которые обычно отключают multidisabler-ы: Vaultkeeper, proca, TLC HDM/ICCC/KG, CASS, WSM, FRP.
 
 Инструкция
 
