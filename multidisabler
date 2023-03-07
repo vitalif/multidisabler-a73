@@ -181,7 +181,7 @@ disable_recovery_restoration() {
 
   done
 
-  [ -z "$found" ] && echo " -   Found no stock recovery. Pfft."
+  [ -z "$found" ] && echo " -   Found no stock recovery. Pfft." || true
 }
 
 echo " "
@@ -264,3 +264,5 @@ umount $ANDROID_ROOT
 echo " "
 echo " - Finished."
 echo " "
+
+exit 0
