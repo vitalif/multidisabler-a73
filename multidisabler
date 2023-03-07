@@ -226,6 +226,13 @@ echo " - Detected a $device device with a $fw bootloader."
 echo " - The environment appears to be Android $major."
 echo " "
 
+echo " - Mounting /data..."
+mount /data || true
+if ! mount | grep '/data ' >/dev/null; then
+  echo " -   Mount failed. Aborting..."
+  exit 3
+fi
+
 echo " - Mounting $ANDROID_ROOT..."
 if ! mount | grep "$ANDROID_ROOT " >/dev/null; then
   mount -o rw $ANDROID_ROOT 2>/dev/null || true
