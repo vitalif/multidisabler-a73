@@ -8,7 +8,7 @@
 # Use this _JUST_ after installing TWRP to prime your device!
 #
 # What does it do:
-# - Makes /vendor and /system read-write
+# - Makes /vendor and /system read-write and converts /system to ext4
 # - Disables file-based encryption on /data
 # - Disables full-disk encryption on /data
 # - Disables stock recovery restoration
@@ -61,6 +61,7 @@ resize_fs() {
   local label=$2
   local partname=$3
   local percent=$4
+  local convert_fs=$5
   local dm_block_ext4=$(df -t ext4 | grep "$path"'$' | cut -DF1)
   local dm_block_f2fs=$(df -t f2fs | grep "$path"'$' | cut -DF1)
 
@@ -85,7 +86,11 @@ resize_fs() {
     uuid=`toybox blkid $dm_block_f2fs | egrep '[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}' -o`
     echo " - Create R/W $partname image..."
     truncate -s ${new_fs_size_mb}M /data/new-rw.img
-    make_f2fs -g android -O project_quota,extra_attr,inode_checksum,sb_checksum,compression,flexible_inline_xattr,verity,inode_crtime -U $uuid -f -l $label /data/new-rw.img
+    if [ "$convert_fs" = "ext4" ]; then
+      mke2fs -t ext4 -U $uuid -L $label /data/new-rw.img
+    else
+      make_f2fs -g android -O project_quota,extra_attr,inode_checksum,sb_checksum,compression,flexible_inline_xattr,verity,inode_crtime -U $uuid -f -l $label /data/new-rw.img
+    fi
     mkdir -p /data/new-rw
     mount /data/new-rw.img /data/new-rw
     echo " - Copy old R/O $partname files to our new created image..."
@@ -100,7 +105,11 @@ resize_fs() {
     umount $path
     umount /data/new-rw
     echo " - Checking $partname image before flashing..."
-    fsck.f2fs -f /data/new-rw.img
+    if [ "$convert_fs" = "ext4" ]; then
+      e2fsck -f /data/new-rw.img
+    else
+      fsck.f2fs -f /data/new-rw.img
+    fi
     echo " - Resizing partition $partname inside 'super' to $new_fs_size_mb MB using lptools"
     lptools resize $partname $(stat -c '%s' /data/new-rw.img)
     lptools unmap $partname
@@ -110,8 +119,7 @@ resize_fs() {
     rm -rf /data/new-rw*
   fi
   echo " - Remounting $path..."
-  mount $path
-  mount -o remount,rw $path
+  mount -o rw /dev/block/bootdevice/by-name/$partname $path
 }
 
 fs_free_size_check() {
@@ -409,7 +417,7 @@ if ! mount | grep '/vendor ' >/dev/null; then
   exit 3
 fi
 
-fs_free_size_check $ANDROID_ROOT "/" system 70
+fs_free_size_check $ANDROID_ROOT "/" system 70 ext4
 fs_free_size_check /vendor vendor vendor 50
 disable_fbe
 disable_fde
