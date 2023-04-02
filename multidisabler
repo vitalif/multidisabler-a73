@@ -8,7 +8,8 @@
 # Use this _JUST_ after installing TWRP to prime your device!
 #
 # What does it do:
-# - Makes /vendor and /system read-write and converts /system to ext4
+# - Makes /vendor, /system and /product read-write and converts /system to ext4
+#   (TODO: Convert /vendor and /product to ext4 too)
 # - Disables file-based encryption on /data
 # - Disables full-disk encryption on /data
 # - Disables stock recovery restoration
@@ -417,8 +418,17 @@ if ! mount | grep '/vendor ' >/dev/null; then
   exit 3
 fi
 
+echo " - Mounting /product..."
+mount /product || true
+mount -o remount,rw /product || true
+if ! mount | grep '/product ' >/dev/null; then
+  echo " -   Mount failed. Aborting..."
+  exit 3
+fi
+
 fs_free_size_check $ANDROID_ROOT "/" system 70 ext4
 fs_free_size_check /vendor vendor vendor 50
+fs_free_size_check /product product product 50
 disable_fbe
 disable_fde
 disable_recovery_restoration
@@ -434,6 +444,8 @@ if [ $major -gt 9 ]; then
   disable_cass
 fi
 
+echo " - Unmounting /product..."
+umount /product
 echo " - Unmounting /vendor..."
 umount /vendor
 echo " - Unmounting $ANDROID_ROOT..."
