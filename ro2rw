@@ -1,0 +1,172 @@
+#!/system/bin/sh
+#
+# RO2RW for any Android phone
+#
+# Makes /vendor, /system and /product read-write
+# And converts /system from f2fs to ext4 if it's f2fs
+#
+# (c) Vitaliy Filippov 2023
+#
+
+set -e
+
+resize_fs() {
+  local path=$1
+  local label=$2
+  local partname=$3
+  local percent=$4
+  local convert_fs=$5
+  local dm_block_ext4=$(df -t ext4 | grep "$path"'$' | cut -DF1)
+  local dm_block_f2fs=$(df -t f2fs | grep "$path"'$' | cut -DF1)
+
+  fs_size_mb=`du -sm $path | cut -f1`
+  part_size_mb=`blockdev --getsize64 $dm_block_ext4 $dm_block_f2fs | awk '{print int($1 / 1048576)}'`
+  super_free_mb=`lptools free | grep Free | awk '{print int($3 / 1048576)}'`
+  new_fs_size_mb=`echo $fs_size_mb $super_free_mb $percent | awk '{print int($1 + $2 * $3 / 100)}'`
+  if [[ "$new_fs_size_mb" -le "$part_size_mb" ]]; then
+    # just in case if we resized the partition, but not the FS
+    new_fs_size_mb=$part_size_mb
+  fi
+  new_fs_size=`echo $new_fs_size_mb | awk '{print $1 * 1048576}'`
+
+  if [ "$dm_block_ext4" ]; then
+    echo " - Unmounting $path..."
+    umount $path
+    echo " - Resizing partition $partname inside 'super' to $new_fs_size_mb MB using lptools"
+    lptools resize $partname $new_fs_size
+    lptools unmap $partname
+    lptools map $partname
+    echo " - Checking $path block partition before resizing..."
+    e2fsck -f $dm_block_ext4
+    echo " - Resizing the filesystem on $dm_block_ext4..."
+    resize2fs $dm_block_ext4
+    echo " - Make the $path partition R/W by unsharing its blocks..."
+    e2fsck -E unshare_blocks $dm_block_ext4
+  elif [ "$dm_block_f2fs" ]; then
+    uuid=`toybox blkid $dm_block_f2fs | egrep '[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}' -o`
+    echo " - Create R/W $partname image..."
+    truncate -s ${new_fs_size_mb}M /data/new-rw.img
+    if [ "$convert_fs" = "ext4" ]; then
+      mke2fs -t ext4 -U $uuid -L $label /data/new-rw.img
+    else
+      make_f2fs -g android -O project_quota,extra_attr,inode_checksum,sb_checksum,compression,flexible_inline_xattr,verity,inode_crtime -U $uuid -f -l $label /data/new-rw.img
+    fi
+    mkdir -p /data/new-rw
+    mount /data/new-rw.img /data/new-rw
+    echo " - Copy old R/O $partname files to our new created image..."
+    cp -a --preserve=all $path/* /data/new-rw
+    # Android's toybox `cp` is buggy: `cp -a --preserve=all` does NOT preserve selinux contexts
+    # on directories and symlinks and you get a bootloop. So we need to restore selinux contexts...
+    cd $path
+    find . -type dl -exec ls -dZ {} \; | awk '{ print "chcon -h " $0 }' > /data/new-rw-chcon.sh
+    cd /data/new-rw
+    sh /data/new-rw-chcon.sh
+    cd /
+    umount $path
+    umount /data/new-rw
+    echo " - Checking $partname image before flashing..."
+    if [ "$convert_fs" = "ext4" ]; then
+      e2fsck -f /data/new-rw.img
+    else
+      fsck.f2fs -f /data/new-rw.img
+    fi
+    echo " - Resizing partition $partname inside 'super' to $new_fs_size_mb MB using lptools"
+    lptools resize $partname $(stat -c '%s' /data/new-rw.img)
+    lptools unmap $partname
+    lptools map $partname
+    echo " - Writing our new R/W $partname image, please wait..."
+    dd if=/data/new-rw.img of=/dev/block/bootdevice/by-name/$partname bs=1M
+    rm -rf /data/new-rw*
+  fi
+  echo " - Remounting $path..."
+  mount $path -o rw
+}
+
+fs_free_size_check() {
+  local path=$1
+  local label=$2
+  local partname=$3
+  local percent=$4
+  echo " - Checking $path free space..."
+  if dd if=/dev/zero of=$path/test bs=1 count=1 2>/dev/null; then
+    echo " -     ...succeeded."
+    rm -f $path/test || true
+  else
+    echo " -     ...No free space on $path, attempting to resize it..."
+    echo " "
+    rm -f $path/test || true
+    resize_fs "$path" "$label" "$partname" "$percent"
+  fi
+}
+
+echo " "
+echo "RO2RW"
+echo " "
+
+os=$(getprop ro.build.version.release)
+major=${os%%.*}
+dp=$(getprop ro.boot.dynamic_partitions)
+
+if [ $major -lt 9 ]; then
+  echo " - This software is incompatible with Android $major."
+  echo " - Installation aborted."
+  echo " "
+  exit 1
+fi
+
+echo " - Mounting /data..."
+mount /data || true
+if ! mount | grep '/data ' >/dev/null; then
+  echo " -   Mount failed. Aborting..."
+  exit 3
+fi
+
+echo " - Mounting $ANDROID_ROOT..."
+if ! mount | grep "$ANDROID_ROOT " >/dev/null; then
+  mount -o rw $ANDROID_ROOT 2>/dev/null || true
+  if ! mount | grep "$ANDROID_ROOT " >/dev/null; then
+    ANDROID_ROOT=/system_root
+    echo " -   Attempt failed. Mounting at $ANDROID_ROOT..."
+    if ! mount | grep "$ANDROID_ROOT " >/dev/null; then
+      mount -o rw $ANDROID_ROOT
+      if ! mount | grep "$ANDROID_ROOT " >/dev/null; then
+        echo " -   Even that attempt failed. Aborting..."
+        exit 2
+      fi
+    fi
+  fi
+fi
+
+echo " - Mounting /vendor..."
+mount /vendor || true
+mount -o remount,rw /vendor || true
+if ! mount | grep '/vendor ' >/dev/null; then
+  echo " -   Mount failed. Aborting..."
+  exit 3
+fi
+
+echo " - Mounting /product..."
+mount /product || true
+mount -o remount,rw /product || true
+if ! mount | grep '/product ' >/dev/null; then
+  echo " -   Mount failed. Aborting..."
+  exit 3
+fi
+
+slot=$(getprop ro.boot.slot_suffix)
+fs_free_size_check $ANDROID_ROOT "/" system$slot 70 ext4
+fs_free_size_check /vendor vendor vendor$slot 50
+fs_free_size_check /product product product$slot 50
+
+echo " - Unmounting /product..."
+umount /product
+echo " - Unmounting /vendor..."
+umount /vendor
+echo " - Unmounting $ANDROID_ROOT..."
+umount $ANDROID_ROOT
+
+echo " "
+echo " - Finished."
+echo " "
+
+exit 0
